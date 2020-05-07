@@ -1,14 +1,13 @@
 #pragma once
 
-#include <libfranka.h> // TODO: install
-#include <Eigen/Dense> // TODO: install this
+#include <eigen/Eigen/Dense> // TODO: install this
 #include <vector>
 #include <math.h>
 #include <random>
 #include <limits>
 
 //Lib franka includes
-#include <franks/exception.h>
+#include <franka/exception.h>
 #include <franka/robot.h>
 #include <franka/duration.h>
 #include <franka/model.h>
@@ -188,7 +187,7 @@ public:
       Eigen::Map<const Eigen::Matrix<double, 7, 1>> G(gravity_array.data());
       
       //accel is finite difference of joint velocities
-      float timeDiff = xRand.tail(1) - xi.tail(1);
+      double timeDiff = xRand.tail(1) - xi.tail(1);
       
       VectorXf z_accel = (xRand(seq(7,last-1)) - xi(seq(7,last-1)))/timeDiff;
 
@@ -207,8 +206,19 @@ public:
       std::array<double, 7> tau_d_rate_limited = franka::limitRate(franka::kMaxTorqueRate, tau_d_calculated, franka_state->tau_J_d);
 
       // Define callback for the joint torque control loop.
-      auto torque_control_callback = [&](const franka::RobotState& state, franka::Duration /*period*/) -> franka::Torques {
+      
+      double time = 0.0;
+      double maxTime = timeDiff; 
+
+      auto torque_control_callback = [&](const franka::RobotState& state, franka::Duration time_step) -> franka::Torques {
               
+              time += time_step.toSec();
+
+              if (time >= max_time) {
+                // Return MotionFinished at the end of the trajectory.
+                return franka::MotionFinished(output);
+              }
+
               //return torque command
               return tau_d_rate_limited;
             }
