@@ -1,3 +1,5 @@
+#pragma once
+
 #include <libfranka.h> // TODO: install
 #include <Eigen/Dense> // TODO: install this
 #include <vector>
@@ -8,6 +10,11 @@
 //Lib franka includes
 #include <franks/exception.h>
 #include <franka/robot.h>
+#include <franka/duration.h>
+#include <franka/model.h>
+#include <franka/rate_limiting.h>
+#include <franka/robot.h>
+
 
 using namespace Eigen;
 
@@ -17,12 +24,14 @@ class TreeNode
     VectorXf state_time;
     TreeNode* parentIdx =  nullptr;
     TreeNode* childIdx = nullptr;
-    franka::RobotState& franka_state; //this will have to be saved each time dynamics is applied
+    franka::RobotState* franka_state = nullptr; //this will have to be saved each time dynamics is applied
+    
 
   public:
     // --- CONSTRUCTORS --- //
     TreeNode() {}
     TreeNode(VectorXf state_time) : state_time(state_time) {}
+    TreeNode(VectorXf state_time, franka::RobotState* franka_state) : state_time(state_time), franka_state(franka_state) {}
 
     VectorXf get_state() const
     {
@@ -34,9 +43,15 @@ class TreeNode
       return state_time.tail(1);
     }
 
-    RobotState& getRobotState const
+    RobotState& getRobotState() const
     {
       return franka_state;
+    }
+
+    // --- DESTRUCTOR --- //
+    ~TreeNode()
+    {
+      delete franka_state;
     }
 
 };
@@ -44,15 +59,15 @@ class TreeNode
 class TBRRT
 {
 private:
-    std::vector<std::vector<float>> min_state_;
-    std::vector<std::vector<float>> max_state_;
+    std::vector<std::vector<float>> min_state;
+    std::vector<std::vector<float>> max_state;
     std::vector<TreeNode*> tree;
     std::unordered_map<std::pair<TreeNode*, TreeNode*>, float> edge_costs;
-    
     std::array<double, 3> gravity_earth = {0.0, 0.0, -9.8};
 
-    franks::Model model; //should probably be initialized in main and passed into TBRRT when initializing?
-    
+    franka::Robot robot; //should probably be initialized in main and passed into TBRRT when initializing?
+    franka::Model model = robot.loadModel();
+
     VectorXf goal; // This should be state-time vector
     int DoFs;
 
@@ -72,26 +87,77 @@ public:
       //all the franka parameters are at this link:
       // https://frankaemika.github.io/docs/control_parameters.html?highlight=denavit
 
-      // min_state = from_franka;
-      // max_state = from_franka;
+      //theta in rad, theta dot in rad/sec
+      std::vector<float> min_state = {-2.8973,-1.7628,-2.8973,-3.0718,-2.8973,-0.0175,-2.8973,-2.1750,-2.1750,-2.1750,-2.1750,-2.6100,-2.6100,-2.6100,0.0};
+      std::vector<float> max_state = {2.8973,1.7628,2.8973,-0.0698,2.8973,3.7525,2.8973,2.1750,2.1750,2.1750,2.1750,2.6100,2.6100,2.6100,goal.tail(1)};
 
       TreeNode* start_node = new TreeNode(start);
       tree.push_back(start_node);
     }
 
     // --- MEMBER FUCTIONS --- //
-    TreeNode* nearestNeighbor(std::vector<float> xRand)
+    TreeNode* nearestNeighbor(VectorXf xRand)
     {
 
       /**
-       * 1. sample a state, time vector. Maximum time is the time from goal state-time. 
-       * 2. consider all treeNodes with a timestamp before the random sample's time as potential nearest neighbors
-         3. Compute the norm of distance and velocity between these points. 
-         4. Choose the lowest norm as the nearest neighbor. 
+       * Return the nearest node in the graph to the the random node
+       * :param xRand: random state-time vector
+       * 
+       * XXX 1. sample a state, time vector. Maximum time is the time from goal state-time. 
+       * XXX 2. consider all treeNodes with a timestamp before the random sample's time as potential nearest neighbors
+         XXX 3. Compute the norm of distance and velocity between these points. 
+         XXX 4. Choose the lowest norm as the nearest neighbor. 
+      */
 
-            ^^^ end of nearest neighbor
+      TreeNode* minState;
+      float minDistance = std::numeric_limits<double>::infinity(); //TODO: Test min control as the metric
 
-         5. For steering, compute the u between the nearest neighbor and the random neighbor by eqn 12 from the paper. 
+     //assuming state is a treeNode pointer
+      for (auto node : tree)
+      {
+        // Filter nodes that happen in the future
+        // TODO: Maybe a better heuristic?
+        if (node.state_time.tail(1) >= (xRand.tail(1) - dt)) {
+          continue;
+        }
+
+        float distance = (node.state_time(seq(0, last-1)) - xRand(seq(0, last-1))).norm(); // This is equally weighting position & velocity norm
+        
+        if (distance < minDistance)
+        {
+            minState = node;
+            minDistance = distance;
+        }
+      }
+
+      return minState;
+    }
+
+    VectorXf sample()
+    {
+      /**
+       * Sample a random state time vector within the allowable space
+       * Returns state-time vector
+      */
+
+      VectorXf ret;
+      std::mt19937 gen(rd()); // https://stackoverflow.com/questions/16153589/generating-a-uniform-random-integer-in-c
+      for (int i = 0; i < min_state.size(); i++)
+      {
+        std::uniform_real_distribution dist(min_state[i], max_state[i]);
+        ret(i) = dist(gen);
+      }
+      return ret;
+    }
+
+    TreeNode* steer(TreeNode* xi_node, VectorXf xRand)
+    {
+      /**
+       * Returns ui to move from xi towards xRand
+       * :param xi: state-time vector
+       * :param xRand: random state-time vector
+
+        5. For steering, compute the u between the nearest neighbor and the random neighbor by eqn 12 from the paper. 
             Here, z_doubledot is the finite differenced acceleration, where the dt in the denomiator is the difference in time stamps
             for these respective points
 
@@ -102,104 +168,68 @@ public:
 
          8. The point is now added to the tree and we can move on. 
 
-      */
-
-
-
-      /**
-      * Return the nearest node in the graph to the the random node
-      */
-
-      std::vector<float> minState;
-      float minControl = std::numeric_limits<double>::infinity();
-
-     //assuming state is a treeNode pointer
-      for (auto state : tree)
-      {
-        franka::RobotState kafka_state = state.getRobotState();
-
-        // https://github.com/frankaemika/libfranka/blob/master/include/franka/robot_state.h
-        
-        //Get the relevant matrices M, C, and G
-        std::array<double, 49> mass_array = model.mass(kafka_state);
-        std::array<double, 7> coriolis_array = model.coriolis(kafka_state);
-        std::array<double, 7> gravity_array = model.gravity(kafka_state, gravity_earth);
-        
-        //Convert to Eigen for matrix math
-        Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(mass_array.data());
-        Eigen::Map<const Eigen::Matrix<double, 7, 1>> C(coriolis_array.data());
-        Eigen::Map<const Eigen::Matrix<double, 7, 1>> G(gravity_array.data());
-        
-        //compute acceleration vector (z_ddot)
-        
-        //Convert xRand to Eigen vector
-        VectirXf rand(xRand.data());
-        
-        //current state
-        VectorXf stateVec = state->get_state();
-        
-        //accel is finite difference of joint velocities
-        VectorXf z_accel = (rand(seq(6,last-1)) - stateVec(seq(6,last-1)))/dt;
-        
-        //Compute the U from the inertia matrix, coriolois, and gravity matrix from franka
-        // u = M * z_accel + C * z_vel + G
-        
-        VectorXf u =
-        
-        
-        //control = fancy EQN mapping from xRand to state
-
-        if (control < minControl)
-        {
-            minState = state;
-            minControl = control;
-        }
-      }
-    }
-
-    std::vector<float> sample()
-    {
-      /**
-       * Sample the joint space
-      */
-
-      std::vector<float> ret;
-
-      // TODO: This might need a generator seed? https://stackoverflow.com/questions/16153589/generating-a-uniform-random-integer-in-c
-      for (int i = 0; i < min_state.size(); i++)
-      {
-          dist = std::uniform_real_distribution(min_state[i], max_state[i]);
-          ret.push_back(dist())
-      }
-
-      return ret;
-    }
-
-    VectorXf steer(VectorXf xi, VectorXf xRand)
-    {
-      /**
-       * Returns ui to move from xi towards xRand
-       * :param xi: state representation
-       * :param xRand: random state configuration
        */
 
+      VectorXf xi = xi_node.state_time;
+
+      franka::RobotState* franka_state = node.getRobotState();
+
+      // https://github.com/frankaemika/libfranka/blob/master/include/franka/robot_state.h
+      
+      //Get the relevant matrices M, C, and G
+      std::array<double, 49> mass_array = model.mass(*franka_state);
+      std::array<double, 7> coriolis_array = model.coriolis(*franka_state);
+      std::array<double, 7> gravity_array = model.gravity(*kafka_state, gravity_earth);
+      
+      //Convert to Eigen for matrix math
+      Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(mass_array.data());
+      Eigen::Map<const Eigen::Matrix<double, 7, 1>> C_diag(coriolis_array.data());
+      Eigen::Matrix<double, 7, 7> C = C_diag.asDiagonal();
+      Eigen::Map<const Eigen::Matrix<double, 7, 1>> G(gravity_array.data());
+      
+      //accel is finite difference of joint velocities
+      float timeDiff = xRand.tail(1) - xi.tail(1);
+      
+      VectorXf z_accel = (xRand(seq(7,last-1)) - xi(seq(7,last-1)))/timeDiff;
+
+      VectorXf z_vel = xi(seq(7,last-1));
+      
+      //Compute the U from the inertia matrix, coriolois, and gravity matrix from franka
+      // u = M * z_accel + C * z_vel + G
+      
+      // (7x7) * (7x1) + (7 x 7) * (7*1) + (7*1) --> (7x1)
+      VectorXf u = M * z_accel + C * z_vel + G; 
+  
+      //array for the calculated torque for use with rate limiting function
+      std::array<double, 7> tau_d_calculated(u.data);
+
+      //apply rate limiter to the contol. May not be necessary if we are only extracting tau_J_d at the end from each state anyways
+      std::array<double, 7> tau_d_rate_limited = franka::limitRate(franka::kMaxTorqueRate, tau_d_calculated, franka_state->tau_J_d);
+
+      // Define callback for the joint torque control loop.
+      auto torque_control_callback = [&](const franka::RobotState& state, franka::Duration /*period*/) -> franka::Torques {
+              
+              //return torque command
+              return tau_d_rate_limited;
+            }
+
+      //start the real-time control loop
+      robot.control(torque_control_callback);
+
+      //record the ending state of the robot and save this into a new treeNode in the tree
+      franka::RobotState* endingState = new robot.getState();
+
+      //return this new treeNode* so that an edge can be added between xi and the new TreeNode*
+      // endingState.q // This is a std::array<double, 7> of the joint positions
+      // endingState.dq // This is a std::array<double, 7> of the joint velocities
+      VectorXf end_state_time(14);
+      end_state_time << ending_state.q.data(), ending_state.dq.data(), timeDiff;
+
+      return new TreeNode(ending_state_time, endingState);
+      
     }
 
-    VectorXf apply_dynamics(VectorXf xi, VectorXf ui)
-    {
-      /**
-       * :param xi: state_time representation
-       * :param ui: 6-dimensional control vector
-       */
-
-      // TODO: Return velocities and accelerations for each joint? in state TIME!!!
-      // return {theta1_vel, theta2_vel, ...., theta1_acc, theta2_acc... }
-      // Are we assuming constant acceleration?
-
-      return; // MAKE SURE to add 1 to the end of the state
-    }
-
-    bool is_reachable(std::vector<float> state_time)
+    bool is_reachable(VectorXf state_time)
     {
       /**
        * Returns true if the the state does not result in a self collision, otherwise false
@@ -221,14 +251,30 @@ public:
       state_time = n->state_time;
 
       // TODO: Parameterize the indexing based of DoF
-      float dist_norm = (state_time(seq(0, 5)) - goal(seq(0, 5))).norm();
-      float vel_norm = (state_time(seq(6, 11)) - goal(seq(6, 11))).norm();
+      float dist_norm = (state_time(seq(0, 6) - goal(seq(0, 6))).norm();
+      float vel_norm = (state_time(seq(7, 13)) - goal(seq(7, 13))).norm();
       float time_norm = (state_time.tail(1) - goal.tail(1)).norm();
 
-      if ((dist_norm < eps[0]) and (vel_norm < eps[1]) and (time_norm < eps[2]))
+      if ((dist_norm < eps[0]) && (vel_norm < eps[1]) && (time_norm < eps[2]))
       {
         return true;
       } else {return false;}
+    }
+
+    std::vector<VectorXf> get_path(TreeNode* end_node)
+    {
+      // TODO: Should we return the state_time or controls? What is the best for visualization?
+      // TODO: Should this be VectorXf?
+      std::vector<VectorXf> path;
+      TreeNode* node = end_node
+      while (node->parent != nullptr)
+      {
+        path.push_back(node->state_time);
+        node = node->parent;
+      }
+
+      path.push_back(node->state_time);
+      return path.reverse();
     }
 
     std::vector<std::vector> search(int iterations = 10000)
@@ -244,27 +290,19 @@ public:
 
         VectorXf xRand = sample();
         TreeNode* xi = nearestNeighbor(xRand);
-        VectorXf ui = steer(xi->get_state(), xRand);
-          
-        //Note: I think here we should let Franka apply the dynamics and extract the q and dq data for robot_state. Adjusted the line below to reflect this
-        
-        //should this return an array with robotState and also the state-time vector?
-        franka::RobotState xi_1_franka = apply_dynamics(xi->state_time, ui);
+        TreeNode* xi_1 = steer(xi, xRand);
 
-        if (is_reachable(xi_1))
+        if (is_reachable(xi_1.state_time))
         {
-          TreeNode* n = new TreeNode(xi_1);
-          tree.push_back(n);
+          tree.push_back(xi_1);
           add_edge(xi, xi_1);
           if (in_tolerance(xi_1))
           {
-            
+            std::vector<std::vector<float>> path = get_path(xi_1);
+            return path;
           }
         }
-
       }
-
-      return path;
     }
 
     // --- DESTRUCTOR --- //
