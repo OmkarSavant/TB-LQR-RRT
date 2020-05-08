@@ -1,162 +1,317 @@
-import numpy as np 
-import networkx as nx
-from rtree import index
-# import rospy
+import numpy as np
+from tqdm import tqdm
+import control
+import pdb
 
-class BallisticMotion():
-    def __init__(self):
-        """
-        Class to handle the dynamics of the ball
-        """
 
-    def collision():
-        """
-        Updates dynamics after a collision occurs
-        """
-        return
+# class BallisticMotion():
+#     def __init__(self):
+#         """
+#         Class to handle the dynamics of the ball
+#         """
 
-    def get_position(self, t):
-        """
-        Returns the position of the ball given its dynamics
-        """
-        return np.array([0, t, 1.0, 0, 0, 0])
+#     def collision(self):
+#         """
+#         Updates dynamics after a collision occurs
+#         """
+#         return
+
+#     def get_position(self, t):
+#         """
+#         Returns the position of the ball given its dynamics
+#         """
+#         return np.array([0, t, 1.0, 0, 0, 0])
+        
+class Node:
+    def __init__(self, state_time = np.zeros(7)):
+        
+        self.hasDynamics = False
+        self.hasLQR = False
+
+        self.state_time = state_time
+        self.M = None
+        self.C = None
+        self.G = None
+
+        #lqr params
+        self.K = None
+        self.S = None
+
+        self.parent = np.nan
+        self.child = np.nan
+    
 
 
 class TBRRT():
-    def __init__(self, start, goal, mode = 'manipulator'):
+    def __init__(self, start, goal):
         """
         :param start: robot arm starting position
         :param goal: goal position
         """
         
-        # Setup RTree
-        dim = len(start)
-        p = index.Property()
-        p.dimension = dim
-        self.Tree = index.Index(interleaved=True, properties=p)
-
-        # Setup Graph
-        self.G = nx.Digraph()
+        self.Tree = []
+        self.edge_costs = {} # (parent, child) -> cost
 
         # Store variables
-        self.start = start
-        self.goal = goal #TODO: How to select the goal such that it interfaces with the ball flight?
-        self.mode = mode
+        self.dt = 0.2
 
-        if (self.mode == 'manipulator'):
-            self.min_state = np.array([0, -5*np.pi/6, -5*np.pi/6, -20, -20, -20])
-            self.max_state = np.array([2*np.pi, 5*np.pi/6, 5*np.pi/6, 20, 20, 20])
+        self.goal = goal
+        self.min_state_time = np.array([0, -5*np.pi/6, -5*np.pi/6, -20, -20, -20, 0])
+        self.max_state_time = np.array([2*np.pi, 5*np.pi/6, 5*np.pi/6, 20, 20, 20, self.goal[-1]])
+        self.eps = np.array([2.8, 0.2, 0.03])
+        
+        # Add start node to the tree
+        self.Tree.append(Node(start))
 
+        #store coefficients for the M, C, and G matrices 
+        self.g = -9.8
 
+        #mass of each link
+        self.m1 = 1.87
+        self.m2 = 2.2
+        self.m3 = 2.2
+
+        #distance from centroid to corresponding axis
+        self.l1 = 0.125
+        self.l2 = 0.125
+        self.l3 = 0.25
+
+        #link length
+        self.L1 = 0.25
+        self.L2 = 0.25
+        self.L3 = 0.5
+
+        #masses of joints
+        self.mc1 = 0.3
+        self.mc2 = 0.3
+        
+        #moments of inertia
+        self.J1 = 0.0097395
+        self.J2 = 0.011458
+        self.J3 = 0.045833
+        
+        #frictional torque coefficients
+        self.c1 = 0.7056
+        self.c2 = 0.7056
+        self.c3 = 0.7056
+        
+        self.A11 = self.m1*self.l1**2 + self.J1 + (self.m2 + self.m3 + self.mc1 + self.mc2)*self.L1**2
+        self.A12 = (self.m2*self.l2 + (self.m3 + self.mc2)*self.L2)*self.L1
+        self.A13 = self.m3 * self.l3 * self.L1
+
+        self.A22 = self.m2*self.l2**2 + self.J2 + (self.m3 + self.mc2)*self.L2**2
+        self.A23 = self.m3*self.l3*self.L2
+        self.A33 = self.m3*self.l3**2 + self.J3
+        
+        self.B11 = -(self.c1 + self.c2)
+        self.B12 = self.c2 + (self.m2*self.l2 + (self.m3 + self.mc2)*self.L2)*self.L1
+        self.B13 = self.m3 * self.l3 * self.L1
+        
+        self.B21 = self.c2 - (self.m2*self.l1 + (self.m3 + self.mc2)*self.L2)*self.L1
+        self.B22 = -(self.c2 + self.c3)
+        self.B23 = self.c3 + self.m3*self.l3*self.L2
+
+        self.B32 = self.c3 - self.m3*self.l3*self.L2
+        self.B33 = -self.c3
+
+        self.C1 = (self.m1*self.l1 + (self.m2 + self.m3 + self.mc1 + self.mc2)*self.L1)*self.g
+        self.C2 = (self.m2*self.l2 + (self.m3 + self.mc2)*self.L2)*self.g
+        self.C3 = self.m3*self.l3*self.g
+
+        self.Q = np.eye(6) * 10
+        self.R = np.eye(2) * 1
 
     def sample(self):
         """
         Sample the joint space
         """
-                    
-        return np.random.uniform(self.min_state, self.max_state)
+        rand_state_time = np.random.uniform(self.min_state_time, self.max_state_time)
+        xRand = Node(rand_state_time)
+        self.gen_dynamics(xRand)
+        self.gen_lqr(xRand)
+        return xRand
 
     def nearest_neighbor(self, xRand):
         """
         Find the node in the graph which requires the smallest magnitude of u to get to from the random state.
-        TODO: Given the control limits, can we calculate state bounds and use this as a heuristic? Or just check within a radius. Or
-        terminate if control is less than some value?
-        Approximate nearest neighbors
-        - Can also use sqrt(N) samples
         """
 
-        # DON'T LOOK AT TIME FOR NEAREST NEIGHBOR, BUT RETRUN FULL STATE-TIME VECTOR!
+        #within a neighborhood of XRand, determine the lowest cost to go
+        minCost = np.inf
+        minNode = None
 
-        min_state = ()
-        min_control = np.inf
+        for node in self.Tree:
 
-        for state in self.G.nodes():
+            #filter for nodes that are within a 15 degree ball for all three angular states to ensure linearlity of LQR approx
+            #handle wrapping and absolute, convert from rad to degree
+            # https://stackoverflow.com/questions/1878907/the-smallest-difference-between-2-angles
+            if abs(np.tan2(np.sin(node.state_time[0] - xRand.state_time[0]), np.cos(node.state_time[0] - xRand.state_time[0]))) > 0.262:
+                continue
+
+            if abs(np.tan2(np.sin(node.state_time[1] - xRand.state_time[1]), np.cos(node.state_time[1] - xRand.state_time[1]))) > 0.262:
+                continue
+
+            if abs(np.tan2(np.sin(node.state_time[2] - xRand.state_time[2]), np.cos(node.state_time[2] - xRand.state_time[2]))) > 0.262:
+                continue
+
+            #find the cost to go from the neighbor to xRand
+            v_minus_x = np.matrix((node.state_time[0:7] - xRand[0:7]))
+
+            cost = np.matmul(np.matmul(np.transpose(v_minus_x),xRand.S), v_minus_x)
+
+            if cost < minCost:
+                minNode = node
+                minCost = cost
             
-            #compute the u vector required to reach this state
-
-            #f(xk,uk) = M_inverse * (u - C(x1,x2)*x2 - G(x1))
-            #xK+1 = xk + f(xk, uk)*dt 
-
-            J1 = np.array([[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]])
-            
-            
-            f = (state - xRand)/self.dt
-
-            u = M * f + self.C(xRand)*x2 + self.G(xRand)
-            
-            if control < min_control:
-                
-                min_state = state
-                min_control = control
-            
-        return min_state #This should be the state-time vector
-
-    def C(self, state):
-        """
-        """
-        return
+        return minNode #This should be the state-time vector
 
     def steer(self, xi, xRand):
         """
         Select ui to move from xi toward xrand
         """
-        return ui
+        #use the K matrix from xi, and the difference in state should be (xRand-xi)
+        x_del = xRand - xi
+        ui = xi.K * x_del
 
-    def dynamics(self, xi, ui):
-        """
-        :param xi: xi is the full state time vector, but only the state will be used
-        returns state time_vector after applying dynamics as described by f(xi, ui)
-        """
-        #TODO
-        return velocities?
+        xi_1 = self.simulate_system(xi, xi.state_time, ui, self.dt)
+
+        return xi_1, ui
 
     def is_reachable(self, xi):
         """
         Checks if xi is reachable, i.e. not self collisions or joint limits
         """
+        #TODO: Check if any of the links intersect...
         return True
+
+    def add_edge(self, parent, child, ui):
+        parent.child = child
+        child.parent = parent
+        self.edge_costs[(parent, child)] = ui
+
+    def near_goal(self, xi_1):
+        dist_norm = np.linalg.norm(xi_1[0:3] - self.goal[0:3])
+        vel_norm = np.linalg.norm(xi_1[3:7] - self.goal[3:7])
+        time_norm = np.linalg.norm(xi_1[-1] - self.goal[-1])
+
+        if (dist_norm < self.eps[0]) and (vel_norm < self.eps[1]) and (time_norm < self.eps[2]):
+            return True
+        else:
+            return False
+
+    def get_path(self, end_node):
+        path = []
+        node = end_node
+        
+        while node.parent != None:
+            path.append(node.parent.state_time)
+            node = node.parent
+
+        path.append(node)
+        return path.reverse()
+
+    def gen_lqr(self, node):
+
+        """ 
+        Create a local estimate of the K and S matrices
+
+        Linearize about x, with u = 0 (as per paper)
+        """
+        node.hasLQR = True
+
+        control_signal = np.zeros([2,1])
+        currState = node.state_time[0:6]
+
+        eps = 1e-5
+
+        time_step = 0.01
+        
+        A = np.zeros([len(currState),len(currState)])
+
+        for i in range(len(currState)):
+            x = currState
+            x[i] += eps
+            x_inc = self.simulate_system(node, x, control_signal, time_step)
+            x = currState
+            x[i] -= eps
+            x_dec = self.simulate_system(node, x, control_signal, time_step)
+            A[:,i] = (x_inc - x_dec) / (2*eps)
+
+        B = np.zeros([len(currState), len(control_signal)])
+        for i in range(len(control_signal)):
+            u = control_signal
+            u[i] += eps
+            x_inc = self.simulate_system(node, currState, u, time_step)
+            u = control_signal
+            u[i] -= eps
+            x_dec = self.simulate_system(node, currState, u, time_step)
+            B[:,i] = (x_inc - x_dec) / (2*eps)
+
+        node.K, node.S, E = control.lqr(A, B, self.Q, self.R)
+    
+    def gen_dynamics(self, node):
+
+        node.hasDynamics = True
+        
+        #thetas
+        t1, t2, t3 = node.state_time[0], node.state_time[1], node.state_time[2]
+        
+        #theta dots
+        td1, td2, td3 = node.state_time[3], node.state_time[4], node.state_time[5]
+
+        node.M = np.matrix([[self.A11, self.A12 * np.cos(t2 - t1), self.A13 * np.cos(t3 - t1)],
+                        [self.A12 * np.cos(t2-t1), self.A22, self.A23 * np.cos(t3 - t2)],
+                        [self.A13 * np.cos(t3 - t1), self.A23*np.cos(t3 - t2), self.A33]])
+
+        
+        node.C = np.matrix([[self.B11, self.B12*np.sin(t2-t1)*td2, self.B13 * np.sin(t3-t1)*td3],
+                        [self.B21*np.sin(t2-t1)*td1, self.B22, self.B23*np.sin(t3-t2)*td3],
+                        [-self.B13*np.sin(t3-t1)*td1, self.B32*np.sin(t3-t2)*td2, self.B33]])
+        
+        node.G = np.matrix([[self.C1*np.sin(t1)],[self.C2*np.sin(t2)],[self.C3*np.sin(t3)]])
+
+
+    def simulate_system(self, node, state, input, time_step = 0.01): 
+        """
+        Simulate system. Only works on state, NOT state time
+        """
+        #velocity component
+        x_dot = state[3:6].reshape(3,1)
+        # D = np.matrix([-input[0]],[input[0]-input[1]],[input[1]])
+        D = np.array([-input[0],input[0]-input[1], input[1]]).reshape(-1, 1)
+
+        z_ddot = np.matmul(np.linalg.inv(node.M), (np.matmul(node.C, x_dot) + node.G + D))
+        updateVec = np.append(x_dot, z_ddot)
+
+        new_state = state + updateVec * time_step        
+        return new_state
 
     def search(self, max_samples):
         """
         Perform TB-RRT Algorithm
         :param max_samples: Number of samples until termination 
         """
-        for k in range(max_samples):
+        for _ in tqdm(range(max_samples)):
 
             xRand = self.sample()
             xi = self.nearest_neighbor(xRand)
-            xRand = self.sample()
-            ui = self.steer(xi, xRand)
-            xi_1 = xi + np.array([self.dynamics(xi, ui), 1]) * self.dt
+            xi_1, ui = self.steer(xi, xRand)
 
             if self.is_reachable(xi_1):
-                
+                xi_1 = np.append(xi_1, xi.state_time[-1]+self.dt)
+                n = Node(xi_1)
 
-            
-            
-            
-            
-        # for k = 1 --> K: 
-            #xRand = random state-time vector
-                #xi <-- nearest_neighbor(T,xrand)
-                #select ui to move from xi towards xRand
-                #x_i+1 <-- xi + [f(xi,ui) 1]^T * delta_T
-                
-                #if xi+1 is in set Xfree:
+                #potentially only need gen_dynamics if we are steering
+                self.gen_dynamics(n)
+                self.gen_lqr(n)
 
-                    #add xi+1 to Tree 
-                    # add edge (xi,xi+1) to T  with weight of control ui
-
-                    
-                    #if metric function rho(xi+1, X_goal) < eps:
-                        
-                        #calculate path P in Tree from xo to xi+1
-
-                        #return P
-
+                self.Tree.append(n)
+                self.add_edge(xi, xi_1, ui)
+                if self.near_goal(xi_1):
+                    path = self.get_path(n)
+                    return path
 
 """
-
 - "Nearest neighbor" is the state in the tree that requires the least amount of control effort to get to x_rand. 
 Questions: How do determine the control cost between two states? For example if x_i is moving in the opposite direction of x_rand, then what
 is the cost to make it happen? If we assume instantaneous acceleration. 
@@ -173,19 +328,16 @@ dictionary which contains the 6d vector of actual joint torques during this tran
 
 """
 
-
-
-
 if __name__=='__main__':
     
     #state = theta (degrees), theta_dot, time
     
     #Start position 
-    start = np.array([0,0])
+    start = np.array([0,0,0,0,0,0,0])
 
     #end position
-    end = np.array([15,0.5])
+    end = np.array([0, 0.5, 0.5, 0, 0.5, 0.5, 3.0]) # This is random...
 
     #intialize Tree with Xo (starting point)
     rrt = TBRRT(start,end)
-    path = rrt.search(10000)            
+    path = rrt.search(10000)
