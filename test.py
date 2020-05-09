@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 #         Returns the position of the ball given its dynamics
 #         """
 #         return np.array([0, t, 1.0, 0, 0, 0])
-        
+
 class Node:
     def __init__(self, state_time = np.zeros(7, dtype=float)):
         
