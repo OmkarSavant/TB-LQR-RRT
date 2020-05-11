@@ -1,326 +1,344 @@
-#pragma once
-
-#include <eigen/Eigen/Dense> // TODO: install this
-#include <vector>
-#include <math.h>
-#include <random>
-#include <limits>
-
-//Lib franka includes
-#include <franka/exception.h>
-#include <franka/robot.h>
-#include <franka/duration.h>
-#include <franka/model.h>
-#include <franka/rate_limiting.h>
-#include <franka/robot.h>
+import numpy as np
+from tqdm import tqdm
+import control
+import pdb
 
 
-using namespace Eigen;
+# class BallisticMotion():
+#     def __init__(self):
+#         """
+#         Class to handle the dynamics of the ball
+#         """
 
-class TreeNode
-{
-  private:
-    VectorXf state_time;
-    TreeNode* parentIdx =  nullptr;
-    TreeNode* childIdx = nullptr;
-    franka::RobotState* franka_state = nullptr; //this will have to be saved each time dynamics is applied
+#     def collision(self):
+#         """
+#         Updates dynamics after a collision occurs
+#         """
+#         return
+
+#     def get_position(self, t):
+#         """
+#         Returns the position of the ball given its dynamics
+#         """
+#         return np.array([0, t, 1.0, 0, 0, 0])
+        
+class Node:
+    def __init__(self, state_time = np.zeros(7)):
+        
+        self.hasDynamics = False
+        self.hasLQR = False
+
+        self.state_time = state_time
+        self.M = None
+        self.C = None
+        self.G = None
+
+        #lqr params
+        self.K = None
+        self.S = None
+
+        self.parent = np.nan
+        self.child = np.nan
     
 
-  public:
-    // --- CONSTRUCTORS --- //
-    TreeNode() {}
-    TreeNode(VectorXf state_time) : state_time(state_time) {}
-    TreeNode(VectorXf state_time, franka::RobotState* franka_state) : state_time(state_time), franka_state(franka_state) {}
 
-    VectorXf get_state() const
-    {
-      return state_time(seq(0, last-1));
-    }
-
-    float get_time() const
-    {
-      return state_time.tail(1);
-    }
-
-    RobotState& getRobotState() const
-    {
-      return franka_state;
-    }
-
-    // --- DESTRUCTOR --- //
-    ~TreeNode()
-    {
-      delete franka_state;
-    }
-
-};
-
-class TBRRT
-{
-private:
-    std::vector<std::vector<float>> min_state;
-    std::vector<std::vector<float>> max_state;
-    std::vector<TreeNode*> tree;
-    std::unordered_map<std::pair<TreeNode*, TreeNode*>, float> edge_costs;
-    std::array<double, 3> gravity_earth = {0.0, 0.0, -9.8};
-
-    franka::Robot robot; //should probably be initialized in main and passed into TBRRT when initializing?
-    franka::Model model = robot.loadModel();
-
-    VectorXf goal; // This should be state-time vector
-    int DoFs;
-
-    std::vector<float> eps {0.5, 0.5, 0.5}; // {dist_tol, speed_tol, time_tol} Chec, this initialization
-    float dt;
-
-public:
-    // --- CONSTRUCTOR --- //
-    TBRRT(VectorXf start, VectorXf goal) : dt(0.02), goal(goal)
-    {
-      /**
-       * :param start: state_time representation of start. start time should be 0
-       * :param goal: state_time representation of goal.
-       */
-
-      DoFs = (start.size() - 1) / 2;
-      //all the franka parameters are at this link:
-      // https://frankaemika.github.io/docs/control_parameters.html?highlight=denavit
-
-      //theta in rad, theta dot in rad/sec
-      std::vector<float> min_state = {-2.8973,-1.7628,-2.8973,-3.0718,-2.8973,-0.0175,-2.8973,-2.1750,-2.1750,-2.1750,-2.1750,-2.6100,-2.6100,-2.6100,0.0};
-      std::vector<float> max_state = {2.8973,1.7628,2.8973,-0.0698,2.8973,3.7525,2.8973,2.1750,2.1750,2.1750,2.1750,2.6100,2.6100,2.6100,goal.tail(1)};
-
-      TreeNode* start_node = new TreeNode(start);
-      tree.push_back(start_node);
-    }
-
-    // --- MEMBER FUCTIONS --- //
-    TreeNode* nearestNeighbor(VectorXf xRand)
-    {
-
-      /**
-       * Return the nearest node in the graph to the the random node
-       * :param xRand: random state-time vector
-       * 
-       * XXX 1. sample a state, time vector. Maximum time is the time from goal state-time. 
-       * XXX 2. consider all treeNodes with a timestamp before the random sample's time as potential nearest neighbors
-         XXX 3. Compute the norm of distance and velocity between these points. 
-         XXX 4. Choose the lowest norm as the nearest neighbor. 
-      */
-
-      TreeNode* minState;
-      float minDistance = std::numeric_limits<double>::infinity(); //TODO: Test min control as the metric
-
-     //assuming state is a treeNode pointer
-      for (auto node : tree)
-      {
-        // Filter nodes that happen in the future
-        // TODO: Maybe a better heuristic?
-        if (node.state_time.tail(1) >= (xRand.tail(1) - dt)) {
-          continue;
-        }
-
-        float distance = (node.state_time(seq(0, last-1)) - xRand(seq(0, last-1))).norm(); // This is equally weighting position & velocity norm
+class TBRRT():
+    def __init__(self, start, goal):
+        """
+        :param start: robot arm starting position
+        :param goal: goal position
+        """
         
-        if (distance < minDistance)
-        {
-            minState = node;
-            minDistance = distance;
-        }
-      }
+        self.Tree = []
+        self.edge_costs = {} # (parent, child) -> cost
 
-      return minState;
-    }
+        # Store variables
+        self.dt = 0.2
 
-    VectorXf sample()
-    {
-      /**
-       * Sample a random state time vector within the allowable space
-       * Returns state-time vector
-      */
+        self.goal = goal
+        self.min_state_time = np.array([0, -5*np.pi/6, -5*np.pi/6, -20, -20, -20, 0])
+        self.max_state_time = np.array([2*np.pi, 5*np.pi/6, 5*np.pi/6, 20, 20, 20, self.goal[-1]])
+        self.eps = np.array([2.8, 0.2, 0.03])
+        
+        # Add start node to the tree
+        self.Tree.append(Node(start))
 
-      VectorXf ret;
-      std::mt19937 gen(rd()); // https://stackoverflow.com/questions/16153589/generating-a-uniform-random-integer-in-c
-      for (int i = 0; i < min_state.size(); i++)
-      {
-        std::uniform_real_distribution dist(min_state[i], max_state[i]);
-        ret(i) = dist(gen);
-      }
-      return ret;
-    }
+        #store coefficients for the M, C, and G matrices
+        self.g = -9.8
 
-    TreeNode* steer(TreeNode* xi_node, VectorXf xRand)
-    {
-      /**
-       * Returns ui to move from xi towards xRand
-       * :param xi: state-time vector
-       * :param xRand: random state-time vector
+        #mass of each link
+        self.m1 = 1.87
+        self.m2 = 2.2
+        self.m3 = 2.2
 
-        5. For steering, compute the u between the nearest neighbor and the random neighbor by eqn 12 from the paper. 
-            Here, z_doubledot is the finite differenced acceleration, where the dt in the denomiator is the difference in time stamps
-            for these respective points
+        #distance from centroid to corresponding axis
+        self.l1 = 0.125
+        self.l2 = 0.125
+        self.l3 = 0.25
 
-         6. When steering, we will use Franka to apply this U computed above for a time dt (system parameter we choose). 
+        #link length
+        self.L1 = 0.25
+        self.L2 = 0.25
+        self.L3 = 0.5
 
-         7. The point that we end up at after this application of control, will be stored as a new treeNode, with the robotstate from Franka,
-            and whose timeStamp is the nearest neighbor's time stamp + dt. 
+        #masses of joints
+        self.mc1 = 0.3
+        self.mc2 = 0.3
+        
+        #moments of inertia
+        self.J1 = 0.0097395
+        self.J2 = 0.011458
+        self.J3 = 0.045833
+        
+        #frictional torque coefficients
+        self.c1 = 0.7056
+        self.c2 = 0.7056
+        self.c3 = 0.7056
+        
+        self.A11 = self.m1*self.l1**2 + self.J1 + (self.m2 + self.m3 + self.mc1 + self.mc2)*self.L1**2
+        self.A12 = (self.m2*self.l2 + (self.m3 + self.mc2)*self.L2)*self.L1
+        self.A13 = self.m3 * self.l3 * self.L1
 
-         8. The point is now added to the tree and we can move on. 
+        self.A22 = self.m2*self.l2**2 + self.J2 + (self.m3 + self.mc2)*self.L2**2
+        self.A23 = self.m3*self.l3*self.L2
+        self.A33 = self.m3*self.l3**2 + self.J3
+        
+        self.B11 = -(self.c1 + self.c2)
+        self.B12 = self.c2 + (self.m2*self.l2 + (self.m3 + self.mc2)*self.L2)*self.L1
+        self.B13 = self.m3 * self.l3 * self.L1
+        
+        self.B21 = self.c2 - (self.m2*self.l1 + (self.m3 + self.mc2)*self.L2)*self.L1
+        self.B22 = -(self.c2 + self.c3)
+        self.B23 = self.c3 + self.m3*self.l3*self.L2
 
-       */
+        self.B32 = self.c3 - self.m3*self.l3*self.L2
+        self.B33 = -self.c3
 
-      VectorXf xi = xi_node.state_time;
+        self.C1 = (self.m1*self.l1 + (self.m2 + self.m3 + self.mc1 + self.mc2)*self.L1)*self.g
+        self.C2 = (self.m2*self.l2 + (self.m3 + self.mc2)*self.L2)*self.g
+        self.C3 = self.m3*self.l3*self.g
 
-      franka::RobotState* franka_state = node.getRobotState();
+        self.Q = np.eye(6) * 10
+        self.R = np.eye(2) * 1
 
-      // https://github.com/frankaemika/libfranka/blob/master/include/franka/robot_state.h
-      
-      //Get the relevant matrices M, C, and G
-      std::array<double, 49> mass_array = model.mass(*franka_state);
-      std::array<double, 7> coriolis_array = model.coriolis(*franka_state);
-      std::array<double, 7> gravity_array = model.gravity(*kafka_state, gravity_earth);
-      
-      //Convert to Eigen for matrix math
-      Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(mass_array.data());
-      Eigen::Map<const Eigen::Matrix<double, 7, 1>> C_diag(coriolis_array.data());
-      Eigen::Matrix<double, 7, 7> C = C_diag.asDiagonal();
-      Eigen::Map<const Eigen::Matrix<double, 7, 1>> G(gravity_array.data());
-      
-      //accel is finite difference of joint velocities
-      double timeDiff = xRand.tail(1) - xi.tail(1);
-      
-      VectorXf z_accel = (xRand(seq(7,last-1)) - xi(seq(7,last-1)))/timeDiff;
+    def sample(self):
+        """
+        Sample the joint space
+        """
+        rand_state_time = np.random.uniform(self.min_state_time, self.max_state_time)
+        xRand = Node(rand_state_time)
+        self.gen_dynamics(xRand)
+        self.gen_lqr(xRand)
+        return xRand
 
-      VectorXf z_vel = xi(seq(7,last-1));
-      
-      //Compute the U from the inertia matrix, coriolois, and gravity matrix from franka
-      // u = M * z_accel + C * z_vel + G
-      
-      // (7x7) * (7x1) + (7 x 7) * (7*1) + (7*1) --> (7x1)
-      VectorXf u = M * z_accel + C * z_vel + G; 
-  
-      //array for the calculated torque for use with rate limiting function
-      std::array<double, 7> tau_d_calculated(u.data);
+    def nearest_neighbor(self, xRand):
+        """
+        Find the node in the graph which requires the smallest magnitude of u to get to from the random state.
+        """
 
-      //apply rate limiter to the contol. May not be necessary if we are only extracting tau_J_d at the end from each state anyways
-      std::array<double, 7> tau_d_rate_limited = franka::limitRate(franka::kMaxTorqueRate, tau_d_calculated, franka_state->tau_J_d);
+        #within a neighborhood of XRand, determine the lowest cost to go
+        minCost = np.inf
+        minNode = None
 
-      // Define callback for the joint torque control loop.
-      
-      double time = 0.0;
-      double maxTime = timeDiff; 
+        for node in self.Tree:
 
-      auto torque_control_callback = [&](const franka::RobotState& state, franka::Duration time_step) -> franka::Torques {
-              
-              time += time_step.toSec();
+            #filter for nodes that are within a 15 degree ball for all three angular states to ensure linearlity of LQR approx
+            #handle wrapping and absolute, convert from rad to degree
+            # https://stackoverflow.com/questions/1878907/the-smallest-difference-between-2-angles
+            if abs(np.tan2(np.sin(node.state_time[0] - xRand.state_time[0]), np.cos(node.state_time[0] - xRand.state_time[0]))) > 0.262:
+                continue
 
-              if (time >= max_time) {
-                // Return MotionFinished at the end of the trajectory.
-                return franka::MotionFinished(output);
-              }
+            if abs(np.tan2(np.sin(node.state_time[1] - xRand.state_time[1]), np.cos(node.state_time[1] - xRand.state_time[1]))) > 0.262:
+                continue
 
-              //return torque command
-              return tau_d_rate_limited;
-            }
+            if abs(np.tan2(np.sin(node.state_time[2] - xRand.state_time[2]), np.cos(node.state_time[2] - xRand.state_time[2]))) > 0.262:
+                continue
 
-      //start the real-time control loop
-      robot.control(torque_control_callback);
+            #find the cost to go from the neighbor to xRand
+            v_minus_x = np.matrix((node.state_time[0:7] - xRand[0:7]))
 
-      //record the ending state of the robot and save this into a new treeNode in the tree
-      franka::RobotState* endingState = new robot.getState();
+            cost = np.matmul(np.matmul(np.transpose(v_minus_x),xRand.S), v_minus_x)
 
-      //return this new treeNode* so that an edge can be added between xi and the new TreeNode*
-      // endingState.q // This is a std::array<double, 7> of the joint positions
-      // endingState.dq // This is a std::array<double, 7> of the joint velocities
-      VectorXf end_state_time(14);
-      end_state_time << ending_state.q.data(), ending_state.dq.data(), timeDiff;
+            if cost < minCost:
+                minNode = node
+                minCost = cost
+            
+        return minNode #This should be the state-time vector
 
-      return new TreeNode(ending_state_time, endingState);
-      
-    }
+    def steer(self, xi, xRand):
+        """
+        Select ui to move from xi toward xrand
+        """
+        #use the K matrix from xi, and the difference in state should be (xRand-xi)
+        x_del = xRand - xi
+        ui = xi.K * x_del
 
-    bool is_reachable(VectorXf state_time)
-    {
-      /**
-       * Returns true if the the state does not result in a self collision, otherwise false
-       */
+        xi_1 = self.simulate_system(xi, xi.state_time, ui, self.dt)
 
-      return true;
-    }
+        return xi_1, ui
 
-    void add_edge(TreeNode* parent, TreeNode* child, float cost)
-    {
-      parent->child = child;
-      child->parent = parent;
-      edge_costs[{parent, child}] = cost; //TODO: Check this
-    }
+    def is_reachable(self, xi):
+        """
+        Checks if xi is reachable, i.e. not self collisions or joint limits
+        """
+        #TODO: Check if any of the links intersect...
+        return True
 
-    bool in_tolerance(TreeNode* n) const
-    {
-      // We need some concept of dimensionality to parameterize this
-      state_time = n->state_time;
+    def add_edge(self, parent, child, ui):
+        parent.child = child
+        child.parent = parent
+        self.edge_costs[(parent, child)] = ui
 
-      // TODO: Parameterize the indexing based of DoF
-      float dist_norm = (state_time(seq(0, 6) - goal(seq(0, 6))).norm();
-      float vel_norm = (state_time(seq(7, 13)) - goal(seq(7, 13))).norm();
-      float time_norm = (state_time.tail(1) - goal.tail(1)).norm();
+    def near_goal(self, xi_1):
+        dist_norm = np.linalg.norm(xi_1[0:3] - self.goal[0:3])
+        vel_norm = np.linalg.norm(xi_1[3:7] - self.goal[3:7])
+        time_norm = np.linalg.norm(xi_1[-1] - self.goal[-1])
 
-      if ((dist_norm < eps[0]) && (vel_norm < eps[1]) && (time_norm < eps[2]))
-      {
-        return true;
-      } else {return false;}
-    }
+        if (dist_norm < self.eps[0]) and (vel_norm < self.eps[1]) and (time_norm < self.eps[2]):
+            return True
+        else:
+            return False
 
-    std::vector<VectorXf> get_path(TreeNode* end_node)
-    {
-      // TODO: Should we return the state_time or controls? What is the best for visualization?
-      // TODO: Should this be VectorXf?
-      std::vector<VectorXf> path;
-      TreeNode* node = end_node
-      while (node->parent != nullptr)
-      {
-        path.push_back(node->state_time);
-        node = node->parent;
-      }
+    def get_path(self, end_node):
+        path = []
+        node = end_node
+        
+        while node.parent != None:
+            path.append(node.parent.state_time)
+            node = node.parent
 
-      path.push_back(node->state_time);
-      return path.reverse();
-    }
+        path.append(node)
+        return path.reverse()
 
-    std::vector<std::vector> search(int iterations = 10000)
-    {
-      /**
-      * Performs core TB-RRT algorithm
-      */
+    def gen_lqr(self, node):
+
+        """
+        Create a local estimate of the K and S matrices
+
+        Linearize about x, with u = 0 (as per paper)
+        """
+        node.hasLQR = True
+
+        control_signal = np.zeros([2,1])
+        currState = node.state_time[0:6]
+
+        eps = 1e-5
+
+        time_step = 0.01
+        
+        A = np.zeros(len(currState))
+
+        for i in range(len(currState)):
+            x = currState
+            x[i] += eps
+            x_inc = self.simulate_system(node, x, control_signal, time_step)
+            x = currState
+            x[i] -= eps
+            x_dec = self.simulate_system(node, x, control_signal, time_step)
+            A[:,i] = (x_inc - x_dec) / (2*eps)
+
+        B = np.zeros(len(currState), len(control_signal))
+        for i in range(len(control_signal)):
+            u = control_signal
+            u[i] += eps
+            x_inc = self.simulate_system(node, currState, u, time_step)
+            u = control_signal
+            u[i] -= eps
+            x_dec = self.simulate_system(node, currState, u, time_step)
+            B[:,i] = (x_inc - x_dec) / (2*eps)
+
+        node.K, node.S, E = control.lqr(A, B, self.Q, self.R)
     
-      for (int i = 0; i < iterations; i++)
-      {
+    def gen_dynamics(self, node):
+
+        node.hasDynamics = True
         
-        // What is the best way to handle the state_time math within the TreeNode class?
+        #thetas
+        t1, t2, t3 = node.state_time[0], node.state_time[1], node.state_time[2]
+        
+        #theta dots
+        td1, td2, td3 = node.state_time[3], node.state_time[4], node.state_time[5]
 
-        VectorXf xRand = sample();
-        TreeNode* xi = nearestNeighbor(xRand);
-        TreeNode* xi_1 = steer(xi, xRand);
+        node.M = np.matrix([[self.A11, self.A12 * np.cos(t2 - t1), self.A13 * np.cos(t3 - t1)],
+                        [self.A12 * np.cos(t2-t1), self.A22, self.A23 * np.cos(t3 - t2)],
+                        [self.A13 * np.cos(t3 - t1), self.A23*np.cos(t3 - t2), self.A33]])
 
-        if (is_reachable(xi_1.state_time))
-        {
-          tree.push_back(xi_1);
-          add_edge(xi, xi_1);
-          if (in_tolerance(xi_1))
-          {
-            std::vector<std::vector<float>> path = get_path(xi_1);
-            return path;
-          }
-        }
-      }
-    }
+        
+        node.C = np.matrix([[self.B11, self.B12*np.sin(t2-t1)*td2, self.B13 * np.sin(t3-t1)*td3],
+                        [self.B21*np.sin(t2-t1)*td1, self.B22, self.B23*np.sin(t3-t2)*td3],
+                        [-self.B13*np.sin(t3-t1)*td1, self.B32*np.sin(t3-t2)*td2, self.B33]])
+        
+        node.G = np.matrix([[self.C1*np.sin(t1)],[self.C2*np.sin(t2)],[self.C3*np.sin(t3)]])
 
-    // --- DESTRUCTOR --- //
-    ~TBRRT()
-    {
-      for (auto n : tree) {
-        delete n;
-      }
-    }
 
-};
+    def simulate_system(self, node, state, input, time_step = 0.01):
+        """
+        Simulate system. Only works on state, NOT state time
+        """
+        #velocity component
+        x_dot = state[3:6]
+        # D = np.matrix([-input[0]],[input[0]-input[1]],[input[1]])
+        D = np.array([-input[0],input[0]-input[1], input[1]]).reshape(-1, 1)
+
+        pdb.set_trace()
+        z_ddot = np.matmul(np.linalg.inv(node.M), (np.matmul(node.C, x_dot) + node.G + D))
+
+        updateVec = np.append(x_dot, z_ddot)
+        new_state = state + updateVec * time_step
+        
+        return new_state
+
+    def search(self, max_samples):
+        """
+        Perform TB-RRT Algorithm
+        :param max_samples: Number of samples until termination
+        """
+        for _ in tqdm(range(max_samples)):
+
+            xRand = self.sample()
+            xi = self.nearest_neighbor(xRand)
+            xi_1, ui = self.steer(xi, xRand)
+
+            if self.is_reachable(xi_1):
+                n = Node(xi_1)
+
+                #potentially only need gen_dynamics if we are steering
+                self.gen_dynamics(n)
+                self.gen_lqr(n)
+
+                self.Tree.append(n)
+                self.add_edge(xi, xi_1, ui)
+                if self.near_goal(xi_1):
+                    path = self.get_path(n)
+                    return path
+
+"""
+- "Nearest neighbor" is the state in the tree that requires the least amount of control effort to get to x_rand.
+Questions: How do determine the control cost between two states? For example if x_i is moving in the opposite direction of x_rand, then what
+is the cost to make it happen? If we assume instantaneous acceleration.
+How do we reduce the the computational complexity? Pruning? Distance or velocity direction heuristics?
+We probably don't need Rtree...
+
+- When random samples are found, they are done in the position, velocity space. When they are stored in the tree,
+   they are tagged with the appropriate time step by setting it to the parent's time + delta_T
+
+- Edge costs are the norm of controls applied when transitioning between two states. This edge should map to some
+dictionary which contains the 6d vector of actual joint torques during this transitions
+
+- only using their metric function for assessing proximity to goal
+
+"""
+
+if __name__=='__main__':
+    
+    #state = theta (degrees), theta_dot, time
+    
+    #Start position
+    start = np.array([0,0,0,0,0,0,0])
+
+    #end position
+    end = np.array([0, 0.5, 0.5, 0, 0.5, 0.5, 3.0]) # This is random...
+
+    #intialize Tree with Xo (starting point)
+    rrt = TBRRT(start,end)
+    path = rrt.search(10000)

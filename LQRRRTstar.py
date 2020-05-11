@@ -45,20 +45,33 @@ class MCRRT():
         self.m = 2
         self.l = 0.2
 
-        self.A = np.array([[1,1],[0,1]])
+        self.A = np.array([[0,1],[0,0]])
         self.B = np.array([[0],[3/(self.m * self.l**2)]])
         self.Q = np.array([[10,0],[0,10]])
         self.R = np.array([1])
 
         self.K, self.S = self.calc_lqr()
+        
+        self.create_smart_sample()
+        
+    def create_smart_sample(self):
+        
+        #determine distance between start and goal
+        
+        smart_min_theta = np.minimum(np.minimum(self.goal[0],self.start[0]) - 0.1, self.min_state[0])
+    
+        smart_max_theta = np.maximum(np.maximum(self.goal[0],self.start[0]) + 0.1,self.max_state[0])
 
+        self.smart_min_state = np.array([smart_min_theta,self.min_state[1]])
+        self.smart_max_state = np.array([smart_max_theta,self.max_state[1]])
+        
     def sample(self):
         """
         Sample the joint space
         """
 
         #compute the relevant range between the starting position and ending position that should be sampled 
-        return np.random.uniform(self.min_state, self.max_state)
+        return np.random.uniform(self.smart_min_state, self.smart_max_state)
 
     def compute_dist(self, s1, s2):
         """
@@ -96,6 +109,8 @@ class MCRRT():
 
         x_del = xi.state_time[0:-1] - xRand
         u = np.array([-self.K * x_del.reshape(2, 1)]).squeeze()    
+        
+        #print(u)
 
         if u > 2: 
             u = 2
@@ -187,12 +202,13 @@ class MCRRT():
                                
                 self.Tree.append(xi_1_node)
 
-                if len(self.Tree) % 10 == 0:
+                if len(self.Tree) % 50 == 0:
                     print(len(self.Tree))
                 self.add_edge(xi, xi_1_node, np.linalg.norm(xi_u))
                 
                 if self.near_goal(xi_1_stateTime):
                     path, control_cost = self.get_path(xi_1_node)
+                    print("path found")
                     print(control_cost)
                     return path, control_cost
 
@@ -230,10 +246,10 @@ dictionary which contains the 6d vector of actual joint torques during this tran
 if __name__=='__main__':
     
     #Start position 
-    start = np.array([np.pi/2., 0., 0.])
+    start = np.array([np.pi/4., 0., 0.])
 
     #end position
-    end = np.array([np.deg2rad(10), 2, 0.5]) 
+    end = np.array([np.deg2rad(10), 2, 0.3]) 
 
     #intialize Tree with Xo (starting point)
     rrt = MCRRT(start, end)
