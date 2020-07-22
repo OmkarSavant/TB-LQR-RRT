@@ -1,4 +1,4 @@
-# baseball-bot
+
 
 Please see the paper describing the project here: 
 
