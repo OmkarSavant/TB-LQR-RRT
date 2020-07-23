@@ -3,6 +3,8 @@ import pdb
 import matplotlib.pyplot as plt
 import scipy.linalg as sp_linalg
 import control
+import time
+from mpl_toolkits import mplot3d
 
 class Node:
     def __init__(self, state_time = np.zeros(3, dtype=float)):
@@ -15,6 +17,7 @@ class Node:
 
 class MCRRT():
     def __init__(self, start, goal, dt = 0.01):
+        
         """
         :param start: robot arm starting position
         :param goal: goal position
@@ -44,20 +47,33 @@ class MCRRT():
         self.m = 2
         self.l = 0.2
 
-        self.A = np.array([[1,1],[0,1]])
+        self.A = np.array([[0,1],[0,0]])
         self.B = np.array([[0],[3/(self.m * self.l**2)]])
-        self.Q = np.array([[10,0],[0,1]])
+        self.Q = np.array([[10,0],[0,10]]) * 0.125
         self.R = np.array([1])
 
         self.K, self.S = self.calc_lqr()
+        
+        self.create_smart_sample()
+        
+    def create_smart_sample(self):
+        
+        #determine distance between start and goal
+        
+        smart_min_theta = np.minimum(np.minimum(self.goal[0],self.start[0]) - 0.1, self.min_state[0])
+    
+        smart_max_theta = np.maximum(np.maximum(self.goal[0],self.start[0]) + 0.1,self.max_state[0])
 
+        self.smart_min_state = np.array([smart_min_theta,self.min_state[1]])
+        self.smart_max_state = np.array([smart_max_theta,self.max_state[1]])
+        
     def sample(self):
         """
         Sample the joint space
         """
 
         #compute the relevant range between the starting position and ending position that should be sampled 
-        return np.random.uniform(self.min_state, self.max_state)
+        return np.random.uniform(self.smart_min_state, self.smart_max_state)
 
     def compute_dist(self, s1, s2):
         """
@@ -80,7 +96,7 @@ class MCRRT():
             #xRand = xRand.reshape(2, 1)
             v_minus_x = np.matrix(node.state_time[0:-1] - xRand)
 
-            cost = abs(np.matmul(np.matmul(v_minus_x, self.S), v_minus_x.T))
+            cost = np.matmul(np.matmul(v_minus_x, self.S), v_minus_x.T)
 
             if cost < minCost:
                 minNode = node
@@ -96,7 +112,7 @@ class MCRRT():
         x_del = xi.state_time[0:-1] - xRand
         u = np.array([-self.K * x_del.reshape(2, 1)]).squeeze()    
         
-        if u > 2:
+        if u > 2: 
             u = 2
         if u < -2:
             u = -2
@@ -132,14 +148,17 @@ class MCRRT():
         path = []
         node = end_node
         control_cost = 0
+        path.append(end_node)
         
         while node.parent != None:
-            path.append(node.parent.state_time)
+            path.append(node.parent)
             node = node.parent
             control_cost += abs(node.u)
 
         path.append(node)
-        return path.reverse(), control_cost
+        path.reverse()
+
+        return path, control_cost
     
     def simulate_system(self, state, input, time_step = 0.01): 
         """
@@ -186,28 +205,66 @@ class MCRRT():
                                
                 self.Tree.append(xi_1_node)
 
-                if len(self.Tree) % 10 == 0:
+                if len(self.Tree) % 50 == 0:
                     print(len(self.Tree))
                 self.add_edge(xi, xi_1_node, np.linalg.norm(xi_u))
                 
                 if self.near_goal(xi_1_stateTime):
                     path, control_cost = self.get_path(xi_1_node)
+                    print("path found")
                     print(control_cost)
-                    return path, control_cost
+#                    self.plot_tree(path)
+                    return path, control_cost, len(self.Tree)
 
                 # Debugging
-                if len(self.Tree) % 2000 == 0:
+                if len(self.Tree) % 4200 == 0:
                     #TODO: This doesnt consider time...
-                    nearest_to_goal = self.nearest_neighbor(self.goal[0:-1])
-                    longest_path = -np.inf
-                    for node in self.Tree:
-                        t = node.state_time[-1]
-                        if t > longest_path:
-                            longest_path = t
-                    print(longest_path)
-                    pdb.set_trace()
+#                    nearest_to_goal = self.nearest_neighbor(self.goal[0:-1])
+#                    longest_path = -np.inf
+#                    for node in self.Tree:
+#                        t = node.state_time[-1]
+#                        if t > longest_path:
+#                            longest_path = t
+#                    print(longest_path)
+                    return None, None, len(self.Tree)
+
         
         print("No path found")
+
+    def plot_tree(self, path):
+        
+        fig = plt.figure()
+        ax = plt.axes(projection='3d')
+    
+        #theta
+        xdata = [node.state_time[0] for node in self.Tree]
+
+        #theta_dot
+        ydata = [node.state_time[1] for node in self.Tree]
+
+        #time
+        zdata = [node.state_time[2] for node in self.Tree]
+
+        ax.scatter3D(xdata,ydata,zdata, color = 'blue',alpha = 0.3)
+        ax.set_xlabel('theta (rad)')
+        ax.set_ylabel('theta_dot (rad/s)')
+        ax.set_zlabel('time (s)')
+    
+        #plot nodes on path
+        x_path = [node.state_time[0] for node in path]
+        y_path = [node.state_time[1] for node in path]
+        z_path = [node.state_time[2] for node in path]
+
+        ax.scatter3D(x_path,y_path,z_path, color = 'red', alpha=1.0)
+
+        # Plot goal hyper plane....
+
+
+        # Plot start node
+
+        plt.savefig('tree'+str(int(time.time())))
+
+            
 
 """
 - "Nearest neighbor" is the state in the tree that requires the least amount of control effort to get to x_rand. 
@@ -228,13 +285,36 @@ dictionary which contains the 6d vector of actual joint torques during this tran
 
 if __name__=='__main__':
     
+#    costs = []
+#    its = []
+#    
+#    #Start position 
+#    start = np.array([np.pi/2., 0., 0.])
+#        
+#    #end position
+#    end = np.array([np.deg2rad(10), 2, 0.5]) 
+#    
+#    for i in range(10):
+#    
+#        #intialize Tree with Xo (starting point)
+#        rrt = MCRRT(start, end)
+#        
+#        path, cost, it = rrt.search(20000)
+#        costs.append(cost)
+#        its.append(it)
+    
     #Start position 
     start = np.array([np.pi/2., 0., 0.])
-
+    
     #end position
     end = np.array([np.deg2rad(10), 2, 0.5]) 
 
     #intialize Tree with Xo (starting point)
     rrt = MCRRT(start, end)
-
-    path = rrt.search(20000)
+    
+    costs = []
+    its = []
+    
+    path, cost, its = rrt.search(20000)
+        
+    

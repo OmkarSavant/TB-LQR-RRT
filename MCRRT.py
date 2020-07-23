@@ -132,14 +132,17 @@ class MCRRT():
         path = []
         node = end_node
         control_cost = 0
+        path.append(end_node)
         
         while node.parent != None:
-            path.append(node.parent.state_time)
+            path.append(node.parent)
             node = node.parent
             control_cost += abs(node.u)
 
         path.append(node)
-        return path.reverse(), control_cost
+        path.reverse()
+
+        return path, control_cost
     
     def simulate_system(self, state, input, time_step = 0.01): 
         """
@@ -191,19 +194,19 @@ class MCRRT():
                 if self.near_goal(xi_1_stateTime):
                     path, control_cost = self.get_path(xi_1_node)
                     print(control_cost)
-                    return path, control_cost
+                    return path, control_cost, len(self.Tree)
 
                 # Debugging
-                if len(self.Tree) % 5000 == 0:
+                if len(self.Tree) % 4200 == 0:
                     #TODO: This doesnt consider time...
-                    nearest_to_goal = self.nearest_neighbor(self.goal[0:-1])
-                    longest_path = -np.inf
-                    for node in self.Tree:
-                        t = node.state_time[-1]
-                        if t > longest_path:
-                            longest_path = t
-                    print(longest_path)
-                    pdb.set_trace()
+                    return None, None, len(self.Tree)
+#                    nearest_to_goal = self.nearest_neighbor(self.goal[0:-1])
+#                    longest_path = -np.inf
+#                    for node in self.Tree:
+#                        t = node.state_time[-1]
+#                        if t > longest_path:
+#                            longest_path = t
+#                    print(longest_path)
         
         print("No path found")
 
@@ -220,19 +223,38 @@ We probably don't need Rtree...
 - Edge costs are the norm of controls applied when transitioning between two states. This edge should map to some 
 dictionary which contains the 6d vector of actual joint torques during this transitions 
 
-- only using their metric function for assessing proximity to goal 
+- only using their metric functi
+on for assessing proximity to goal 
 
 """
 
 if __name__=='__main__':
     
+#    #Start position 
+#    start = np.array([np.pi/2., 0., 0.])
+#
+#    #end position
+#    end = np.array([np.deg2rad(10), 2, 0.5]) 
+#
+#    #intialize Tree with Xo (starting point)
+#    rrt = MCRRT(start, end)
+#
+#    path, cost = rrt.search(20000)
+    
+    costs = []
+    its = []
+    
     #Start position 
     start = np.array([np.pi/2., 0., 0.])
-
+        
     #end position
     end = np.array([np.deg2rad(10), 2, 0.5]) 
-
-    #intialize Tree with Xo (starting point)
-    rrt = MCRRT(start, end)
-
-    path = rrt.search(20000)
+    
+    for i in range(10):
+    
+        #intialize Tree with Xo (starting point)
+        rrt = MCRRT(start, end)
+        
+        path, cost, it = rrt.search(20000)
+        costs.append(cost)
+        its.append(it)

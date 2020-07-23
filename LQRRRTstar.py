@@ -3,6 +3,11 @@ import pdb
 import matplotlib.pyplot as plt
 import scipy.linalg as sp_linalg
 import control
+from itertools import islice
+import time
+from mpl_toolkits import mplot3d
+
+import math
 
 class Node:
     def __init__(self, state_time = np.zeros(3, dtype=float)):
@@ -12,6 +17,7 @@ class Node:
         self.u = 0
         self.parent = None
         self.children = []
+        self.cost_so_far = 0
 
 class MCRRT():
     def __init__(self, start, goal, dt = 0.01):
@@ -20,6 +26,10 @@ class MCRRT():
         :param start: robot arm starting position
         :param goal: goal position
         """
+
+        #for k nearest
+        self.k = 10 
+
         self.Tree = []
         self.edge_costs = {} # (parent, child) -> cost
 
@@ -29,7 +39,6 @@ class MCRRT():
         # Store variables
         self.dt = dt
 
-        self.goal = goal
         self.eps = np.array([np.deg2rad(2.8), 0.2, 0.03])
 
         # Add start node to the tree
@@ -80,27 +89,66 @@ class MCRRT():
         return sp_linalg.norm(s1 - s2)
         
 
-    def nearest_neighbor(self, xRand):
+    def nearest_neighbor(self, xRand, k = 1):
         """
         Find the node in the graph which requires the smallest magnitude of u to get to from the random state.
         """
         # TODO: Make this more efficient?
         #within a neighborhood of XRand, determine the lowest cost to go
-        minCost = np.inf
-        minNode = None
+
+        nodeDict = {}
 
         for node in self.Tree:
 
+            if node.state_time[-1] > self.goal[-1]:
+                continue
+
             #xRand = xRand.reshape(2, 1)
-            v_minus_x = np.matrix(node.state_time[0:-1] - xRand)
-
+            v_minus_x = np.matrix(node.state_time[0:-1] - xRand[0:-1])
             cost = np.matmul(np.matmul(v_minus_x, self.S), v_minus_x.T)
+            nodeDict[node] = cost
 
-            if cost < minCost:
-                minNode = node
-                minCost = cost
+        #sort this dictionary and output the 10 lowest values 
+        orderedNodes = {k: v for k, v in sorted(nodeDict.items(), key=lambda item: item[1])}
+        
+        k_orderedNodes = [items[0] for items in list(islice(orderedNodes.items(), k))]
 
-        return minNode
+        return k_orderedNodes
+        
+    
+    def TB_nearest_neighbor(self, xRand, k, timeStep):
+        """
+        Find the node in the graph which requires the smallest magnitude of u to get to from the random state.
+        """
+        # TODO: Make this more efficient?
+        #within a neighborhood of XRand, determine the lowest cost to go
+
+        nodeDict = {}
+
+        #print('new tb call:' + str(xRand[-1]) + 'timestep: ' + str(timeStep))
+        for node in self.Tree:
+
+            #print(node.state_time[-1])
+
+            #if the time step is not from the previous time step, not interested
+            if math.isclose(node.state_time[-1],(xRand[-1] + timeStep*self.dt)) == False:
+                continue
+            
+            #print('new child' + str(node.state_time[-1]))
+            #xRand = xRand.reshape(2, 1)
+            v_minus_x = np.matrix(node.state_time[0:-1] - xRand[0:-1])
+            cost = np.matmul(np.matmul(v_minus_x, self.S), v_minus_x.T)
+            nodeDict[node] = cost
+
+        #sort this dictionary and output the 10 lowest values 
+        orderedNodes = {k: v for k, v in sorted(nodeDict.items(), key=lambda item: item[1])}
+        
+        k_orderedNodes = [items[0] for items in list(islice(orderedNodes.items(), k))]
+
+        if len(k_orderedNodes) == 0 and timeStep == -1:
+            pdb.set_trace()
+
+        return k_orderedNodes
 
     def steer(self, xi, xRand):
         """
@@ -148,14 +196,17 @@ class MCRRT():
         path = []
         node = end_node
         control_cost = 0
+        path.append(end_node)
         
         while node.parent != None:
-            path.append(node.parent.state_time)
+            path.append(node.parent)
             node = node.parent
             control_cost += abs(node.u)
 
         path.append(node)
-        return path.reverse(), control_cost
+        path.reverse()
+
+        return path, control_cost
     
     def simulate_system(self, state, input, time_step = 0.01): 
         """
@@ -168,10 +219,75 @@ class MCRRT():
 
         return xnext
 
+    def calc_lqr_cost(self,x1,x2):
+
+        #determine LQR cost of going from x1 to x2
+        
+        x_del = x1.state_time[0:-1] - x2.state_time[0:-1]
+
+        u = np.array([-self.K * x_del.reshape(2, 1)]).squeeze()    
+       
+        return u
+        
+
     def calc_lqr(self):
          K, S, _ = control.lqr(self.A, self.B, self.Q, self.R)
 
          return K, S
+
+    def chooseParent(self, X_near, xRand):
+        """
+        X_near: list of k nearest NODES
+        xRand: randoom STATE vector (not a node)
+        """
+ 
+        minCost = np.inf
+        x_min = None
+        sigma_min = None
+
+        for x_near in X_near:
+
+            sigma, u = self.steer(x_near,xRand)
+
+            if x_near.cost + u < minCost:
+                minCost = x_near.cost + u
+                x_min = x_near
+                sigma_min = sigma
+
+        return x_min, sigma_min
+    
+    def plot_tree(self, path):
+        
+        fig = plt.figure()
+        ax = plt.axes(projection='3d')
+    
+        #theta
+        xdata = [node.state_time[0] for node in self.Tree]
+
+        #theta_dot
+        ydata = [node.state_time[1] for node in self.Tree]
+
+        #time
+        zdata = [node.state_time[2] for node in self.Tree]
+
+        ax.scatter3D(xdata,ydata,zdata, color = 'blue',alpha = 0.3)
+        ax.set_xlabel('theta (rad)')
+        ax.set_ylabel('theta_dot (rad/s)')
+        ax.set_zlabel('time (s)')
+    
+        #plot nodes on path
+        x_path = [node.state_time[0] for node in path]
+        y_path = [node.state_time[1] for node in path]
+        z_path = [node.state_time[2] for node in path]
+
+        ax.scatter3D(x_path,y_path,z_path, color = 'red', alpha=1.0)
+        
+        # Plot goal hyper plane....
+
+
+        # Plot start node
+
+        plt.savefig('tree'+str(int(time.time())))
 
     def search(self, max_samples = 10000):
         """
@@ -182,49 +298,76 @@ class MCRRT():
         while (len(self.Tree) < max_samples):
             
             xRand = self.sample()
+            xNearest = self.nearest_neighbor(xRand, k = 1)[0]
+            xNew, cost = self.steer(xNearest, xRand)
+            
+            # Prepare xNew as node
+            xNew_stateTime = np.append(xNew, xNearest.state_time[-1] + self.dt)
+            xNew = Node(xNew_stateTime)
+            xNew.cost_so_far = xNearest.cost_so_far + cost # Check this
 
-            xi = self.nearest_neighbor(xRand)
-
-            # xi = self.Tree[np.random.randint(len(self.Tree))]
-
-            xi_1, xi_u = self.steer(xi, xRand)
-
-            if self.is_reachable(xi_1):
-
-                xi_1_stateTime = np.append(xi_1, xi.state_time[-1] + self.dt)
+            #should be collissionFree 
+            if self.is_reachable(xNew):
+                k = np.minimum(np.maximum(int(2*np.e*np.log(len(self.Tree))), 1), len(self.Tree))
                 
-                if xi_1_stateTime[-1] > self.goal[-1]:
-                    continue
+                #list of nodes
+                # Choose best parent
+                # from the past
+                xNear = self.TB_nearest_neighbor(xNew.state_time, k, -1.0)
 
-                xi_1_node = Node(xi_1_stateTime)
+                xMin = None
+                cMin = np.inf
+
+                for xn in xNear:
+
+                    tmp_cost = xn.cost_so_far + self.calc_lqr_cost(xn, xNew)
+
+                    if tmp_cost < cMin:
+                        xMin = xn
+                        cMin = tmp_cost
+
+                # Add to tree
+                xNew.cost_so_far = cMin
+                self.Tree.append(xNew)
                 
-                xi_1_node.u = xi_u
-                               
-                self.Tree.append(xi_1_node)
+                # Add edge
+                xNew.parent = xMin
+                xMin.children.append(xNew)
+                xNew.state_time[-1] = xNew.parent.state_time[-1] + self.dt
+                
+                # Rewire
+                xNear = self.TB_nearest_neighbor(xNew.state_time, k, 1.0)
 
-                if len(self.Tree) % 50 == 0:
+                #xNear should be from the future
+                for xn in xNear:
+                    
+                    #another get_cost call 
+                    tmp_cost = xNew.cost_so_far + self.calc_lqr_cost(xNew, xn)
+                    if tmp_cost < xn.cost_so_far:
+
+                        xn.parent.children.remove(xn)
+                        xn.parent = xNew    
+                        xNew.children.append(xn)
+                        xn.cost_so_far = tmp_cost
+                        xNew.state_time[-1] = xNew.parent.state_time[-1] + self.dt
+
+                if len(self.Tree) % 20 == 0:
                     print(len(self.Tree))
-                self.add_edge(xi, xi_1_node, np.linalg.norm(xi_u))
-                
-                if self.near_goal(xi_1_stateTime):
-                    path, control_cost = self.get_path(xi_1_node)
-                    print("path found")
-                    print(control_cost)
-                    return path, control_cost
 
-                # Debugging
-                if len(self.Tree) % 5000 == 0:
-                    #TODO: This doesnt consider time...
-                    nearest_to_goal = self.nearest_neighbor(self.goal[0:-1])
-                    longest_path = -np.inf
-                    for node in self.Tree:
-                        t = node.state_time[-1]
-                        if t > longest_path:
-                            longest_path = t
-                    print(longest_path)
-                    pdb.set_trace()
+        # Find path after some number of iterations
+        for node in self.Tree:
+            if self.near_goal(node.state_time):
+                path, total_control = self.get_path(node)
+                self.plot_tree(path)
+                return path, total_control
+            
+            #even if there's no path, get the closest node to the end 
+            else:
+                pass
+
         
         print("No path found")
+        pdb.set_trace()
 
 """
 - "Nearest neighbor" is the state in the tree that requires the least amount of control effort to get to x_rand. 
@@ -254,4 +397,5 @@ if __name__=='__main__':
     #intialize Tree with Xo (starting point)
     rrt = MCRRT(start, end)
 
-    path = rrt.search(20000)
+    path = rrt.search(1000) #yeah
+    pdb.set_trace()
